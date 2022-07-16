@@ -1,4 +1,5 @@
 import argparse
+from ctypes import ArgumentError
 import io
 import math
 from typing import Generator
@@ -8,7 +9,13 @@ import numpy as np
 from PIL import Image
 from scipy.fftpack import idct
 
-from decode import tables
+from decoder import tables
+
+SYMBOL_SIZE = 8
+MCU_SIDE_LENGTH = 8
+MCU_SIZE = MCU_SIDE_LENGTH ** 2
+AC_SIZE = MCU_SIZE - 1
+CHANNELS = 3
 
 class Bitstream:
     def __init__(self, file: io.FileIO):
@@ -42,39 +49,28 @@ class Bitstream:
     
     @staticmethod
     def twos_complement(s: str) -> int:
+        if len(s) == 0:
+            raise ArgumentError("binary string must not be empty")
         if s[0] == '0':
             complement = ''.join(['1' if x == '0' else '0' for x in s])
             return -int(complement, 2)
         return int(s, 2)
 
-def decode_huffman(huffman_encoded: str, table: str) -> str:
-    """Map huffman encoded bits to binary.
-
-    Args:
-        huffman_encoded (str): bits searched for in huffman codes
-        table (str): huffman table to search
-
-    Returns:
-        str: string representation of byte
-    """
-    code_idx = tables.HUFFMAN_TABLES[table]["codes"].index(huffman_encoded)
+def get_symbol(code: str, table: str) -> str:
+    code_idx = tables.HUFFMAN_TABLES[table]["codes"].index(code)
     symbol = tables.HUFFMAN_TABLES[table]["symbols"][code_idx]
-    if '_DC_' in table:
-        binary_repr = format(symbol, 'b')
-    else:
-        binary_repr = format(symbol, '08b')
-    return binary_repr
+    return symbol
 
-def interpret_symbol(stream: Bitstream, table: str) -> "tuple[int, int]":
-    huffman_encoded = ''
-    while True:
-        huffman_encoded += stream.read(1)
-        if huffman_encoded in tables.HUFFMAN_TABLES[table]["codes"]:
-            break
-    binary_repr = decode_huffman(huffman_encoded, table)
-    if '_DC_' in table:
-        return Bitstream.twos_complement(binary_repr)
+def _interpret_symbol(symbol: int) -> "int, int":
+    binary_repr = format(symbol, '08b')
     return int(binary_repr[:4], 2), int(binary_repr[4:], 2)
+
+def read_symbol(stream: Bitstream, table: str) -> "int, int":
+    code = ''
+    while code not in tables.HUFFMAN_TABLES[table]["codes"]:
+        code += stream.read(1)
+    symbol = get_symbol(code, table)
+    return _interpret_symbol(symbol)
 
 class _ZigZagWalker:
     """Helper class to walk in zigzag pattern through array
@@ -155,31 +151,48 @@ def unzigzag(a: list) -> np.ndarray:
         result[next(walker)] = x
     return result
 
-def _read_channel(stream: Bitstream, table: str) -> "list[int]":
+def read_ac(stream: Bitstream, table: str) -> "list[int]":
     data = []
     while True:
-        zeros, data_length = interpret_symbol(stream, table)
+        zeros, data_length = read_symbol(stream, table)
+        data.extend([0] * (zeros)) # apply 0 run
         if data_length == 0:
-            data.extend([0] * (63 - len(data)))
-            break
-        data.extend([0] * (zeros))
-        data.append(Bitstream.twos_complement(stream.read(data_length)))
+            if zeros == 0:
+                data.extend([0] * (AC_SIZE - len(data)))
+                print("end")
+                break
+            continue
+        value = Bitstream.twos_complement(stream.read(data_length))
+        print(zeros, data_length, value)
+        data.append(value)
+    assert len(data) == AC_SIZE, f"len(data) = {len(data)} != {AC_SIZE}"
     return data
+
+def read_dc(stream: Bitstream, table: str) -> int:
+    zeros, data_length = read_symbol(stream, table)
+    assert zeros == 0
+    value = Bitstream.twos_complement(stream.read(data_length))
+    return value
 
 def quantize(channel, quant_table):
     return np.multiply(
-        channel, np.reshape(tables.QUANTIZATION_TABLES[quant_table], (64)))
+        channel, np.reshape(tables.QUANTIZATION_TABLES[quant_table], (MCU_SIZE)))
 
 def decode_mcu(stream: Bitstream, last_dc) -> "np.ndarray, np.ndarray, np.ndarray":
-    y = idct(quantize([
-            last_dc[0] + interpret_symbol(stream, 'LUM_DC_TABLE'),
-            *_read_channel(stream, 'LUM_AC_TABLE')], 'LUM'))
-    cb = idct(quantize([
-            last_dc[1] + interpret_symbol(stream, 'COL_DC_TABLE'),
-            *_read_channel(stream, 'COL_AC_TABLE')], 'COL'))
-    cr = idct(quantize([
-            last_dc[2] + interpret_symbol(stream, 'COL_DC_TABLE'),
-            *_read_channel(stream, 'COL_AC_TABLE')], 'COL'))
+    y_raw = [read_dc(stream, 'LUM_DC_TABLE'), *read_ac(stream, 'LUM_AC_TABLE')]
+    print(y_raw)
+    cb_raw = [read_dc(stream, 'COL_DC_TABLE'), *read_ac(stream, 'COL_AC_TABLE')]
+    print(cb_raw)
+    cr_raw = [read_dc(stream, 'COL_DC_TABLE'), *read_ac(stream, 'COL_AC_TABLE')]
+    print(cb_raw)
+
+    y_raw[0] += last_dc[0]
+    cb_raw[0] += last_dc[1]
+    cr_raw[0] += last_dc[2]
+    
+    y = idct(quantize(y_raw, 'LUM'))
+    cb = idct(quantize(cb_raw, 'COL'))
+    cr = idct(quantize(cr_raw, 'COL'))
     return y, cr, cb
 
 def decode(stream: Bitstream) -> np.ndarray:
@@ -199,7 +212,7 @@ def decode(stream: Bitstream) -> np.ndarray:
         mcu = unzigzag(mcu_zigzag)
         data.append(mcu)
     side = math.sqrt(len(data))
-    ycbcr_img = np.reshape(data, (8 * side, 8 * side, 3))
+    ycbcr_img = np.reshape(data, (MCU_SIDE_LENGTH * side, MCU_SIDE_LENGTH * side, CHANNELS))
     rgb_img = cv2.cvtColor(ycbcr_img, cv2.COLOR_YCrCb2RGB)
     return rgb_img
 
@@ -224,7 +237,7 @@ def decoder_arguments():
     parser.add_argument(
         "--codes_filename", "-c",
         type=str,
-        default="codes.bin",
+        default="decoder/codes.bin",
         help="name of binary file containing huffman codes"
     )
     args = parser.parse_args()

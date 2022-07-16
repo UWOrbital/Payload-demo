@@ -1,6 +1,6 @@
 from PIL import Image
 
-from decode import decode
+from decoder import decode
 
 args = decode.decoder_arguments()
 with open(args.codes_filename, 'rb') as codes_file:
