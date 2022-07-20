@@ -1,4 +1,3 @@
-import argparse
 import io
 import logging
 import math
@@ -10,7 +9,7 @@ from scipy.fftpack import idct
 
 from decoder import tables
 
-logging.basicConfig(format="%(levelname)s:%(module)s: %(message)s", level=logging.DEBUG)
+logging.basicConfig(format="%(levelname)s:%(module)s: %(message)s", level=logging.INFO)
 
 SYMBOL_SIZE = 8
 MCU_SIDE_LENGTH = 8
@@ -308,7 +307,7 @@ def trim_domain(a: np.ndarray, domain: tuple=None) -> np.ndarray:
     cp[cp > domain[1]] = domain[1]
     return cp
 
-def decode(stream: Bitstream, mcu_count: int) -> np.ndarray:
+def decode(stream: Bitstream, resolution: int, grey=False) -> np.ndarray:
     """Decode stream to 2d array of rgb pixels
 
     Args:
@@ -318,8 +317,9 @@ def decode(stream: Bitstream, mcu_count: int) -> np.ndarray:
     Returns:
         np.ndarray: 2d array of rgb pixels
     """
-    data = []
+    mcus = []
     last_dc = [0, 0, 0]
+    mcu_count = int(resolution[0] * resolution[1] / (MCU_SIDE_LENGTH ** 2))
     for i in range(mcu_count):
         mcu_zigzag = list(zip(*decode_mcu(stream, last_dc)))
         last_dc = mcu_zigzag[0]
@@ -328,11 +328,12 @@ def decode(stream: Bitstream, mcu_count: int) -> np.ndarray:
             [list(pixel) for pixel in row]
             for row in mcu
         ]
-        data.append(mcu)
+        mcus.append(np.array(mcu))
         logging.debug(f'mcu {i + 1} done')
-    side = math.floor(math.sqrt(len(data)))
-    ycrcb_img = np.reshape(data, (MCU_SIDE_LENGTH * side, MCU_SIDE_LENGTH * side, CHANNELS))
-    
+    ycrcb_img = np.reshape(mcus, (resolution[1], resolution[0], CHANNELS))
+    if grey:
+        ycrcb_img[:, :, 1:] = 0
+    ycrcb_img = trim_domain(ycrcb_img)
     rgb_img = cv2.cvtColor(np.float32(ycrcb_img), cv2.COLOR_YCrCb2RGB)
     return rgb_img
 
@@ -351,30 +352,3 @@ def load_codes(stream: io.FileIO):
         ]
     assert bstream.read(1) == ''
     assert tables.HUFFMAN_TABLES[list(tables.HUFFMAN_TABLES.keys())[-1]]['codes'][-1] != ''
-
-def decoder_arguments() -> argparse.Namespace:
-    """Parse arguments for decoder
-
-    Returns:
-        argparse.namespace: parsed arguments
-    """
-    parser = argparse.ArgumentParser(
-        description="Decode UWOrbital Payload JPEG Compression"
-    )
-    parser.add_argument(
-        "filename", type=str, help="name of binary file to decode"
-    )
-    parser.add_argument(
-        "mcu_count",
-        type=int,
-        default=1,
-        help="number of mcus in image"
-    )
-    parser.add_argument(
-        "--codes_filename", "-c",
-        type=str,
-        default="decoder/codes.bin",
-        help="name of binary file containing huffman codes"
-    )
-    args = parser.parse_args()
-    return args

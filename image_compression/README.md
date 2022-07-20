@@ -38,13 +38,4 @@ pip install -r decoder/requirements.txt
 
 ### Running Decoder
 
-From directory containing `decoder` module (decoder directory), run `decoder` as module
-
-```bash
-python -m decoder [--codes_filename CODES_FILENAME] filename mcu_count
-```
-
-Where
-- `filename` is the encoded image
-- `mcu_count` is number of mcu's to read
-- `--codes_filename` allows the bin file containing codes to be optionally specified as `CODES_FILENAME` if a codes file other than `decoder/codes.bin` is to be used
+From directory containing `decoder` module (decoder directory), run `decoder` as module. Use `-h` flag for more information.
