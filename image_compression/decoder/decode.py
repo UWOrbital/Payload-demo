@@ -76,6 +76,8 @@ class Bitstream:
         """
         if len(s) == 0:
             raise ValueError("binary string must not be empty")
+        if s == '0':
+            return 0
         if s[0] == '0':
             complement = ''.join(['1' if x == '0' else '0' for x in s])
             return -int(complement, 2)
